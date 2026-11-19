@@ -69,11 +69,11 @@ class LawnAudioSource(discord.PCMVolumeTransformer):
             [sys.executable, "-m", "yt_dlp", "--js-runtimes", "deno",
              "--no-playlist", "--no-progress", "--quiet",
              "-f", "bestaudio/best", "-o", "-", url],
-            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            stdout=subprocess.PIPE, stderr=None,
             stdin=subprocess.DEVNULL,
         )
         try:
-            audio = discord.FFmpegPCMAudio(self.downloader.stdout, pipe=True, options="-vn")
+            audio = discord.FFmpegPCMAudio(self.downloader.stdout, pipe=True, options="-vn", stderr=None)
             super().__init__(audio, volume=volume)
         except Exception:
             self.cleanup()
@@ -131,10 +131,14 @@ async def advance(guild_id, expected_generation=None):
         p.generation += 1
         generation = p.generation
         try:
+            print(f"[lawn] Starting: {track.title}", flush=True)
             source = await asyncio.to_thread(LawnAudioSource, track.url, p.volume)
+            print(f"[lawn] Audio processes started for: {track.title}", flush=True)
             def after(error):
                 if error:
-                    print(f"Playback error in {guild_id}: {error}")
+                    print(f"[lawn] Discord playback error in {guild_id}: {error}", flush=True)
+                else:
+                    print(f"[lawn] Playback ended: {track.title}", flush=True)
                 asyncio.run_coroutine_threadsafe(advance(guild_id, generation), bot.loop)
             vc.play(source, after=after)
         except Exception as exc:
