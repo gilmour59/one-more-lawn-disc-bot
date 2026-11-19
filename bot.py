@@ -2,6 +2,8 @@
 import asyncio
 import os
 import random
+import subprocess
+import sys
 from collections import deque
 from dataclasses import dataclass, field
 
@@ -17,8 +19,6 @@ PLAYLIST = os.getenv("LAWN_PLAYLIST_URL", "")
 GUILD_ID = os.getenv("DISCORD_GUILD_ID", "").strip()
 DEFAULT_VOLUME = max(0.0, min(1.0, float(os.getenv("DEFAULT_VOLUME", "0.35"))))
 YDL = {"quiet": True, "no_warnings": True, "extract_flat": "in_playlist", "ignoreerrors": True, "noplaylist": False}
-STREAM_YDL = {"quiet": True, "no_warnings": True, "format": "bestaudio/best", "noplaylist": True, "skip_download": True}
-FFMPEG_BEFORE = "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5"
 
 @dataclass
 class Track:
@@ -61,14 +61,40 @@ def extract_playlist(url):
             result.append(Track(e.get("title") or "Unknown track", link))
     return result
 
-def extract_stream(url):
-    with yt_dlp.YoutubeDL(STREAM_YDL) as ydl:
-        data = ydl.extract_info(url, download=False)
-    if "entries" in data:
-        data = next((e for e in data["entries"] if e), None)
-    if not data or not data.get("url"):
-        raise RuntimeError("No playable audio stream found")
-    return data["url"]
+class LawnAudioSource(discord.PCMVolumeTransformer):
+    """Stream yt-dlp stdout to FFmpeg without saving songs to disk."""
+
+    def __init__(self, url: str, volume: float):
+        self.downloader = subprocess.Popen(
+            [sys.executable, "-m", "yt_dlp", "--js-runtimes", "deno",
+             "--no-playlist", "--no-progress", "--quiet",
+             "-f", "bestaudio/best", "-o", "-", url],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL,
+        )
+        try:
+            audio = discord.FFmpegPCMAudio(self.downloader.stdout, pipe=True, options="-vn")
+            super().__init__(audio, volume=volume)
+        except Exception:
+            self.cleanup()
+            raise
+
+    def cleanup(self):
+        try:
+            super().cleanup()
+        finally:
+            proc = getattr(self, "downloader", None)
+            if proc:
+                if proc.stdout:
+                    proc.stdout.close()
+                if proc.poll() is None:
+                    proc.terminate()
+                    try:
+                        proc.wait(timeout=2)
+                    except subprocess.TimeoutExpired:
+                        proc.kill()
+                        proc.wait()
+
 
 async def ensure_voice(interaction):
     if not interaction.guild or not isinstance(interaction.user, discord.Member) or not interaction.user.voice:
@@ -105,11 +131,7 @@ async def advance(guild_id, expected_generation=None):
         p.generation += 1
         generation = p.generation
         try:
-            stream = await asyncio.to_thread(extract_stream, track.url)
-            source = discord.PCMVolumeTransformer(
-                discord.FFmpegPCMAudio(stream, before_options=FFMPEG_BEFORE, options="-vn"),
-                volume=p.volume,
-            )
+            source = await asyncio.to_thread(LawnAudioSource, track.url, p.volume)
             def after(error):
                 if error:
                     print(f"Playback error in {guild_id}: {error}")
@@ -118,7 +140,12 @@ async def advance(guild_id, expected_generation=None):
         except Exception as exc:
             print(f"Cannot play {track.title}: {exc}")
             p.current = None
-            asyncio.create_task(advance(guild_id, generation))
+            # Avoid rapidly skipping the whole queue when playback setup fails.
+            if p.text_channel:
+                try:
+                    await p.text_channel.send(f"⚠️ Could not start **{track.title}**: {str(exc)[:250]}")
+                except discord.HTTPException:
+                    pass
 
 async def load_catalog(p):
     if not PLAYLIST:
