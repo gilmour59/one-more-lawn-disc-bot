@@ -95,6 +95,8 @@ async def advance(guild_id, expected_generation=None):
         if p.current and p.loop == "one":
             track = p.current
         else:
+            if p.current and p.loop == "all":
+                p.queue.append(p.current)
             if not p.queue:
                 p.current = None
                 return
