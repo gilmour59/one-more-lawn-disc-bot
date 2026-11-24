@@ -90,7 +90,11 @@ async def advance(guild_id, expected_generation=None):
         try:
             print(f"[lawn] Starting: {track.title}", flush=True)
             source = discord.PCMVolumeTransformer(
-                discord.FFmpegPCMAudio(str(track.path), options="-vn"), volume=p.volume
+                discord.FFmpegPCMAudio(
+                    "sine=frequency=440:sample_rate=48000:duration=10",
+                    before_options="-f lavfi",
+                    options="-ac 2 -ar 48000"
+                ), volume=0.8
             )
             print(f"[lawn] Audio processes started for: {track.title}", flush=True)
             def after(error):
