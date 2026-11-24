@@ -1,8 +1,8 @@
 # 🌻 One More Lawn Radio — Discord Bot
 
-A private-server Discord music bot for the *One More Lawn* soundtrack. Uses `discord.py`, `yt-dlp` and FFmpeg to stream audio URLs without permanently downloading MP3s.
+A private-server Discord music bot for the *One More Lawn* soundtrack. Uses `discord.py` and FFmpeg to play audio files stored in the local `music/` folder.
 
-> **Rights and reliability:** Use only streams you are authorized to relay. Non-commercial use does not automatically grant permission to rebroadcast YouTube audio. YouTube may block extraction or change formats, and playback may stop working.
+> **Rights:** Store and play only music you have permission to download and relay.
 
 ## 1. Create a Discord bot
 
@@ -37,11 +37,10 @@ Edit `.env`:
 ```dotenv
 DISCORD_TOKEN=your_secret_token
 DISCORD_GUILD_ID=your_test_server_id
-LAWN_PLAYLIST_URL=https://www.youtube.com/playlist?list=YOUR_AUTHORIZED_PLAYLIST
 DEFAULT_VOLUME=0.35
 ```
 
-Use a **playlist URL** containing the soundtrack, not a `watch?v=...&list=RD...` auto-generated YouTube radio link. A normal YouTube playlist is more predictable. `DISCORD_GUILD_ID` is optional but recommended for immediate slash-command updates in your test server.
+Create a `music/` folder beside `bot.py` and place your authorized `.opus`, `.mp3`, `.m4a`, `.webm`, `.ogg`, `.flac`, or `.wav` files there. The bot scans the folder whenever radio, play, or search is used. The folder is gitignored; downloaded music is not uploaded to GitHub. `LAWN_PLAYLIST_URL` is no longer needed. `DISCORD_GUILD_ID` is optional but recommended for immediate slash-command updates.
 
 Run:
 
@@ -53,7 +52,7 @@ python bot.py
 
 | Command | Description |
 | --- | --- |
-| `/lawn radio` | Shuffle and enqueue the configured playlist |
+| `/lawn radio` | Shuffle and enqueue local songs |
 | `/lawn play query:<title>` | Queue the first matching track |
 | `/lawn search query:<text>` | Search track titles |
 | `/lawn queue` | Show current and next 10 tracks |
@@ -62,7 +61,7 @@ python bot.py
 | `/lawn volume percent:35` | Adjust volume |
 | `/lawn stop` | Stop, clear queue, disconnect |
 
-Join a Discord voice channel before using `/lawn radio` or `/lawn play`. The playlist is fetched when first used and cached in memory. This v1 is **one queue per server**, with no persistence across restarts.
+Join a Discord voice channel before using `/lawn radio` or `/lawn play`. The local music folder is rescanned when radio, play, or search is used. This v1 is **one queue per server**, with no persistence across restarts.
 
 ## 4. Hosting
 
@@ -73,7 +72,7 @@ Run locally on your PC/Mac for initial testing, or on an always-on Linux VPS or 
 - **Commands not showing:** Verify `applications.commands` invite scope, `DISCORD_GUILD_ID`, and restart the bot.
 - **Cannot join voice:** Check Connect/Speak permissions.
 - **FFmpeg not found:** Install FFmpeg and ensure `ffmpeg -version` works in your terminal.
-- **No playable audio:** Verify playlist accessibility, permissions and up-to-date `yt-dlp`. YouTube may block or throttle automated streams.
+- **No playable audio:** Confirm files exist in `music/` and FFmpeg can decode them (`ffplay music/your-song.opus`).
 - **Bot offline:** Check `DISCORD_TOKEN`, Python dependencies and terminal logs.
 
 Never commit your `.env` file or bot token.
