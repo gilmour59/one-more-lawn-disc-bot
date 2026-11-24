@@ -76,3 +76,7 @@ Run locally on your PC/Mac for initial testing, or on an always-on Linux VPS or 
 - **Bot offline:** Check `DISCORD_TOKEN`, Python dependencies and terminal logs.
 
 Never commit your `.env` file or bot token.
+
+### Silent voice playback (green speaking indicator)
+
+On Windows, discord.py 2.7.1 with davey 0.2.0 produced silent voice playback even for a generated test tone. Downgrading to davey 0.1.4 restored audible test-tone playback. Keep the pinned version in requirements.txt until a newer combination is verified. If needed, run `python -m pip install -r requirements.txt` and `python -m pip check`.
