@@ -2,12 +2,18 @@
 import asyncio
 import os
 import random
+import threading
+import time
 from collections import deque
 from dataclasses import dataclass, field
 
 import discord
 from discord import app_commands
 from discord.ext import commands
+try:
+    from discord.ext import voice_recv
+except ImportError:
+    voice_recv = None
 from dotenv import load_dotenv
 import pathlib
 
@@ -35,6 +41,7 @@ class Player:
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
 players: dict[int, Player] = {}
+echo_sessions = {}
 intents = discord.Intents.default()
 bot = commands.Bot(command_prefix="!", intents=intents)
 lawn = app_commands.Group(name="lawn", description="One More Lawn radio controls")
@@ -56,6 +63,8 @@ def scan_music():
 async def ensure_voice(interaction):
     if not interaction.guild or not isinstance(interaction.user, discord.Member) or not interaction.user.voice:
         raise ValueError("Join a voice channel first.")
+    if interaction.guild_id in echo_sessions:
+        raise ValueError('Stop echo mode before starting music.')
     target = interaction.user.voice.channel
     vc = interaction.guild.voice_client
     if vc and vc.channel != target:
@@ -67,6 +76,8 @@ async def ensure_voice(interaction):
 async def advance(guild_id, expected_generation=None):
     p = player_for(guild_id)
     async with p.lock:
+        if guild_id in echo_sessions:
+            return
         if expected_generation is not None and expected_generation != p.generation:
             return
         guild = bot.get_guild(guild_id)
@@ -182,6 +193,8 @@ async def queue(interaction: discord.Interaction):
 @lawn.command(description="Skip the current track")
 async def skip(interaction: discord.Interaction):
     vc = interaction.guild.voice_client if interaction.guild else None
+    if interaction.guild_id in echo_sessions:
+        return await interaction.response.send_message('Use /lawn echo-stop first.', ephemeral=True)
     if not vc or not vc.is_playing():
         return await interaction.response.send_message("Nothing playing.", ephemeral=True)
     p = player_for(interaction.guild_id)
@@ -213,6 +226,7 @@ async def volume(interaction: discord.Interaction, percent: app_commands.Range[i
 @lawn.command(description="Stop music, clear queue and disconnect")
 async def stop(interaction: discord.Interaction):
     p = player_for(interaction.guild_id)
+    await end_echo(interaction.guild_id)
     p.generation += 1
     p.queue.clear()
     p.current = None
@@ -220,6 +234,157 @@ async def stop(interaction: discord.Interaction):
     if vc:
         await vc.disconnect(force=True)
     await interaction.response.send_message("🛑 Radio off. Go mow some grass.")
+
+
+class EchoSource(discord.AudioSource):
+    def __init__(self, member_id):
+        self.member_id = member_id
+        self.frames = deque(maxlen=150)
+        self.lock = threading.Lock()
+        self.closed = False
+
+    def read(self):
+        with self.lock:
+            if self.closed:
+                return b""
+            now = time.monotonic()
+            while self.frames and self.frames[0][0] < now - 1:
+                self.frames.popleft()
+            if self.frames and self.frames[0][0] <= now:
+                return self.frames.popleft()[1]
+        return bytes(3840)
+
+    def cleanup(self):
+        with self.lock:
+            self.closed = True
+            self.frames.clear()
+
+
+if voice_recv is not None:
+    class EchoSink(voice_recv.AudioSink):
+        def __init__(self, source):
+            super().__init__()
+            self.source = source
+
+        def wants_opus(self):
+            return False
+
+        def write(self, user, data):
+            if user is None or user.id != self.source.member_id:
+                return
+            pcm = data.pcm
+            if pcm and len(pcm) == 3840:
+                with self.source.lock:
+                    if not self.source.closed:
+                        self.source.frames.append((time.monotonic() + 2, bytes(pcm)))
+
+        def cleanup(self):
+            pass
+
+
+async def end_echo(guild_id):
+    session = echo_sessions.pop(guild_id, None)
+    if session is None:
+        return False
+    vc, source, channel, expiry = session
+    source.cleanup()
+    if expiry is not asyncio.current_task():
+        expiry.cancel()
+    if vc.is_listening():
+        vc.stop_listening()
+    if vc.is_playing() or vc.is_paused():
+        vc.stop()
+    try:
+        await vc.disconnect(force=True)
+    finally:
+        try:
+            await channel.send("🦜 Echo mode stopped. Audio buffer cleared.")
+        except discord.HTTPException:
+            pass
+    return True
+
+
+class EchoConsent(discord.ui.View):
+    def __init__(self, member_id, channel_id, requester_id):
+        super().__init__(timeout=60)
+        self.member_id = member_id
+        self.channel_id = channel_id
+        self.requester_id = requester_id
+
+    @discord.ui.button(label="Allow echo for 60 seconds", style=discord.ButtonStyle.success)
+    async def accept(self, interaction, button):
+        if interaction.user.id != self.member_id:
+            return await interaction.response.send_message("Only the selected member can accept.", ephemeral=True)
+        self.stop()
+        await interaction.response.edit_message(content="Echo approved. Connecting...", view=None)
+        guild = interaction.guild
+        p = player_for(guild.id)
+        async with p.lock:
+            member = guild.get_member(self.member_id)
+            requester = guild.get_member(self.requester_id)
+            if not member or not member.voice or member.voice.channel.id != self.channel_id or not requester or not requester.voice or requester.voice.channel.id != self.channel_id:
+                return await interaction.followup.send("Both members must still be in the original voice channel.")
+            if guild.id in echo_sessions or guild.voice_client or p.queue or p.current:
+                return await interaction.followup.send("Stop the existing voice session with /lawn stop first.")
+            source = EchoSource(self.member_id)
+            vc = None
+            try:
+                await interaction.followup.send(f"🦜 Echo active for {member.mention} for up to 60 seconds. Use /lawn echo-stop to end it. Only the selected member's audio is buffered.")
+                vc = await member.voice.channel.connect(cls=voice_recv.VoiceRecvClient, timeout=20)
+                if not member.voice or member.voice.channel.id != self.channel_id:
+                    raise ValueError("Selected member left the channel.")
+                async def expire():
+                    await asyncio.sleep(60)
+                    await end_echo(guild.id)
+                expiry = asyncio.create_task(expire())
+                echo_sessions[guild.id] = (vc, source, interaction.channel, expiry)
+                vc.listen(EchoSink(source))
+                vc.play(source)
+            except Exception as exc:
+                source.cleanup()
+                if guild.id in echo_sessions:
+                    await end_echo(guild.id)
+                elif vc:
+                    await vc.disconnect(force=True)
+                await interaction.followup.send(f"Echo could not start: {exc}")
+
+    @discord.ui.button(label="Decline", style=discord.ButtonStyle.secondary)
+    async def decline(self, interaction, button):
+        if interaction.user.id != self.member_id:
+            return await interaction.response.send_message("Only the selected member can decline.", ephemeral=True)
+        self.stop()
+        await interaction.response.edit_message(content="Echo request declined.", view=None)
+
+
+@lawn.command(description="Request consent to echo a member with a two-second delay")
+async def echo(interaction: discord.Interaction, member: discord.Member):
+    if voice_recv is None:
+        return await interaction.response.send_message("Experimental voice receive extension is not installed.", ephemeral=True)
+    if not interaction.guild or not isinstance(interaction.user, discord.Member) or not interaction.user.voice or not member.voice or member.voice.channel != interaction.user.voice.channel or member.bot:
+        return await interaction.response.send_message("Select a human member in your voice channel.", ephemeral=True)
+    if interaction.guild.voice_client or interaction.guild_id in echo_sessions:
+        return await interaction.response.send_message("Use /lawn stop before requesting echo.", ephemeral=True)
+    await interaction.response.send_message(f"{member.mention}, allow Jerem to echo your voice in this channel for 60 seconds? Audio is buffered in memory only. You can stop at any time with /lawn echo-stop.", view=EchoConsent(member.id, member.voice.channel.id, interaction.user.id))
+
+
+@lawn.command(name="echo-stop", description="Stop echo mode and discard buffered audio")
+async def echo_stop(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+    stopped = await end_echo(interaction.guild_id)
+    await interaction.followup.send("Echo stopped." if stopped else "No echo session is active.", ephemeral=True)
+
+
+@bot.event
+async def on_voice_state_update(member, before, after):
+    session = echo_sessions.get(member.guild.id)
+    if session is None:
+        return
+    vc, source, _, _ = session
+    if member.id in (source.member_id, bot.user.id) and after.channel != vc.channel:
+        await end_echo(member.guild.id)
+    elif member.id == source.member_id and (after.self_mute or after.mute):
+        await end_echo(member.guild.id)
+
 
 @bot.event
 async def on_ready():
