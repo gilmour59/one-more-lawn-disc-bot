@@ -80,3 +80,16 @@ Never commit your `.env` file or bot token.
 ### Silent voice playback (green speaking indicator)
 
 On Windows, discord.py 2.7.1 with davey 0.2.0 produced silent voice playback even for a generated test tone. Downgrading to davey 0.1.4 restored audible test-tone playback. Keep the pinned version in requirements.txt until a newer combination is verified. If needed, run `python -m pip install -r requirements.txt` and `python -m pip check`.
+
+
+## Experimental Parrot Mode (feature/parrot-mode only)
+
+Keep the existing davey==0.1.4 pin. Voice receiving is experimental and requires a DAVE-capable receive extension. For a first test, use a separate virtual environment and install the community PR build:
+
+```powershell
+python -m pip install -r requirements.txt
+python -m pip install --no-deps "git+https://github.com/imayhaveborkedit/discord-ext-voice-recv.git@6b9fb95"
+python -m pip check
+````
+
+This is an experimental third-party patch, not a verified production release. Stop music with /lawn stop, then use /lawn echo member:@User. Only the selected human member can approve the request. The session echoes with a two-second delay for up to 60 seconds. Anyone can stop with /lawn echo-stop. Only selected-member PCM is buffered by the bot's echo sink, in RAM, with a bounded queue; nothing is written to disk. Music and echo cannot run concurrently. If the extension fails, switch back to main. Live voice reception has not yet been tested on Windows.
