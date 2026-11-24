@@ -1,9 +1,7 @@
-"""One More Lawn radio: Discord voice bot, streaming public YouTube URLs where authorized."""
+"""One More Lawn radio: play locally stored audio in Discord voice."""
 import asyncio
 import os
 import random
-import subprocess
-import sys
 from collections import deque
 from dataclasses import dataclass, field
 
@@ -11,19 +9,19 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 from dotenv import load_dotenv
-import yt_dlp
+import pathlib
 
 load_dotenv()
 TOKEN = os.getenv("DISCORD_TOKEN", "")
-PLAYLIST = os.getenv("LAWN_PLAYLIST_URL", "")
+MUSIC_DIR = pathlib.Path(__file__).resolve().parent / "music"
 GUILD_ID = os.getenv("DISCORD_GUILD_ID", "").strip()
 DEFAULT_VOLUME = max(0.0, min(1.0, float(os.getenv("DEFAULT_VOLUME", "0.35"))))
-YDL = {"quiet": True, "no_warnings": True, "extract_flat": "in_playlist", "ignoreerrors": True, "noplaylist": False}
+AUDIO_EXTENSIONS = {".opus", ".mp3", ".m4a", ".webm", ".ogg", ".flac", ".wav"}
 
 @dataclass
 class Track:
     title: str
-    url: str
+    path: pathlib.Path
 
 @dataclass
 class Player:
@@ -44,56 +42,15 @@ lawn = app_commands.Group(name="lawn", description="One More Lawn radio controls
 def player_for(guild_id):
     return players.setdefault(guild_id, Player())
 
-def extract_playlist(url):
-    with yt_dlp.YoutubeDL(YDL) as ydl:
-        data = ydl.extract_info(url, download=False)
-    if not data:
-        return []
-    entries = data.get("entries") or [data]
-    result = []
-    for e in entries:
-        if not e:
-            continue
-        link = e.get("webpage_url") or e.get("url") or ""
-        if link and not link.startswith("http"):
-            link = "https://www.youtube.com/watch?v=" + link
-        if link.startswith("http"):
-            result.append(Track(e.get("title") or "Unknown track", link))
-    return result
-
-class LawnAudioSource(discord.PCMVolumeTransformer):
-    """Stream yt-dlp stdout to FFmpeg without saving songs to disk."""
-
-    def __init__(self, url: str, volume: float):
-        self.downloader = subprocess.Popen(
-            [sys.executable, "-m", "yt_dlp", "--js-runtimes", "deno",
-             "--no-playlist", "--no-progress", "--quiet",
-             "-f", "bestaudio/best", "-o", "-", url],
-            stdout=subprocess.PIPE, stderr=None,
-            stdin=subprocess.DEVNULL,
-        )
-        try:
-            audio = discord.FFmpegPCMAudio(self.downloader.stdout, pipe=True, options="-vn", stderr=None)
-            super().__init__(audio, volume=volume)
-        except Exception:
-            self.cleanup()
-            raise
-
-    def cleanup(self):
-        try:
-            super().cleanup()
-        finally:
-            proc = getattr(self, "downloader", None)
-            if proc:
-                if proc.stdout:
-                    proc.stdout.close()
-                if proc.poll() is None:
-                    proc.terminate()
-                    try:
-                        proc.wait(timeout=2)
-                    except subprocess.TimeoutExpired:
-                        proc.kill()
-                        proc.wait()
+def scan_music():
+    if not MUSIC_DIR.is_dir():
+        raise ValueError(f"Music folder not found: {MUSIC_DIR}. Create it and add audio files.")
+    tracks = [
+        Track(path.stem, path)
+        for path in MUSIC_DIR.iterdir()
+        if path.is_file() and path.suffix.lower() in AUDIO_EXTENSIONS
+    ]
+    return sorted(tracks, key=lambda track: track.title.casefold())
 
 
 async def ensure_voice(interaction):
@@ -132,7 +89,9 @@ async def advance(guild_id, expected_generation=None):
         generation = p.generation
         try:
             print(f"[lawn] Starting: {track.title}", flush=True)
-            source = await asyncio.to_thread(LawnAudioSource, track.url, p.volume)
+            source = discord.PCMVolumeTransformer(
+                discord.FFmpegPCMAudio(str(track.path), options="-vn"), volume=p.volume
+            )
             print(f"[lawn] Audio processes started for: {track.title}", flush=True)
             def after(error):
                 if error:
@@ -152,12 +111,10 @@ async def advance(guild_id, expected_generation=None):
                     pass
 
 async def load_catalog(p):
-    if not PLAYLIST:
-        raise ValueError("Set LAWN_PLAYLIST_URL in your .env first.")
+    # Refresh each time so newly downloaded tracks appear without restarting.
+    p.catalog = scan_music()
     if not p.catalog:
-        p.catalog = await asyncio.to_thread(extract_playlist, PLAYLIST)
-    if not p.catalog:
-        raise ValueError("The playlist has no accessible tracks.")
+        raise ValueError(f"No audio files found in {MUSIC_DIR}. Download songs into music/ first.")
     return p.catalog
 
 async def error_reply(interaction, exc):
@@ -167,7 +124,7 @@ async def error_reply(interaction, exc):
     else:
         await interaction.response.send_message(message, ephemeral=True)
 
-@lawn.command(description="Start shuffled radio from the configured playlist")
+@lawn.command(description="Start shuffled radio from local music folder")
 @app_commands.checks.cooldown(1, 5.0, key=lambda i: (i.guild_id, i.user.id))
 async def radio(interaction: discord.Interaction):
     await interaction.response.defer()
