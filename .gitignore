@@ -3,3 +3,6 @@
 __pycache__/
 *.pyc
 *.log
+
+# Downloaded audio stays on your machine
+music/
