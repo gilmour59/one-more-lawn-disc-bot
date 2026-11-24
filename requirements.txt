@@ -1,3 +1,4 @@
 discord.py[voice]>=2.5,<3
 python-dotenv>=1,<2
 yt-dlp>=2025.1
+davey==0.1.4
